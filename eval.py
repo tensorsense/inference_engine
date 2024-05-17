@@ -1,29 +1,16 @@
 import multiprocessing
 import queue
 import requests
-import time
 from tqdm import tqdm
 import openai
 from pathlib import Path
 import pandas as pd
 import json
+import yaml
 from datetime import datetime
 from dotenv import find_dotenv, load_dotenv
 
 _ = load_dotenv(find_dotenv())
-
-
-ENDPOINTS = [
-    "http://localhost:5000/predict",
-]
-
-BATCH_SIZE = 20
-OPENAI_AZURE_DEPLOYMENT = "gpt-35-turbo-1106"
-NUM_OPENAI_WORKERS = 5
-
-VIDEO_PATH = Path("/data/data/MSRVTT_Zero_Shot_QA/videos/all")
-GT_QUESTIONS_PATH = Path("/data/data/MSRVTT_Zero_Shot_QA/test_q1000.json")
-GT_ANSWERS_PATH = Path("/data/data/MSRVTT_Zero_Shot_QA/test_a.json")
 
 
 # Get the current date and time
@@ -37,11 +24,19 @@ llm_output_path = OUTPUT_PATH.joinpath("llm_output.jsonl")
 openai_output_path = OUTPUT_PATH.joinpath("openai_output.jsonl")
 scores_path = OUTPUT_PATH.joinpath("scores.json")
 
+
 # prepare batches
-def prepare_batches(batch_size, temperature, max_new_tokens):
+def prepare_batches(
+    batch_size,
+    temperature,
+    max_new_tokens,
+    gt_questions_path,
+    gt_answers_path,
+    video_path,
+):
     # read annotations from disk
-    q_df = pd.read_json(GT_QUESTIONS_PATH)
-    a_df = pd.read_json(GT_ANSWERS_PATH)
+    q_df = pd.read_json(gt_questions_path)
+    a_df = pd.read_json(gt_answers_path)
 
     df = pd.merge(q_df, a_df, on="question_id")
 
@@ -55,7 +50,7 @@ def prepare_batches(batch_size, temperature, max_new_tokens):
         for _, sample in chunk.iterrows():
             batch["inputs"].append(
                 {
-                    "video_path": Path(VIDEO_PATH)
+                    "video_path": Path(video_path)
                     .joinpath(f"{sample.video_name}.mp4")
                     .resolve()
                     .as_posix(),
@@ -118,6 +113,7 @@ def openai_worker(
     results_queue,
     final_results_list,
     progress_queue,
+    openai_azure_deployment,
 ):
     client = openai.AzureOpenAI()
 
@@ -135,7 +131,7 @@ def openai_worker(
 
         try:
             completion = client.chat.completions.create(
-                model=OPENAI_AZURE_DEPLOYMENT,
+                model=openai_azure_deployment,
                 messages=[
                     {
                         "role": "system",
@@ -180,15 +176,34 @@ def progress_monitor(total_batches, position, progress_queue):
 
 
 if __name__ == "__main__":
+    # Load the YAML configuration file
+    with open("config.yaml", "r") as file:
+        config = yaml.safe_load(file)
+
+    endpoints = config["endpoints"]
+    batch_size = config["batch_size"]
+    openai_azure_deployment = config["openai_azure_deployment"]
+    num_openai_workers = config["num_openai_workers"]
+
+    video_path = Path(config["video_path"])
+    gt_questions_path = Path(config["gt_questions_path"])
+    gt_answers_path = Path(config["gt_answers_path"])
+
+    temperature = config["temperature"]
+    max_new_tokens = config["max_new_tokens"]
+
     # Shared batch list (queue)
     batch_queue = multiprocessing.JoinableQueue()
 
     # Example batches (replace with actual batches)
     batches = prepare_batches(
-        batch_size=BATCH_SIZE, temperature=0.1, max_new_tokens=1024
+        batch_size=batch_size,
+        temperature=temperature,
+        max_new_tokens=max_new_tokens,
+        gt_questions_path=gt_questions_path,
+        gt_answers_path=gt_answers_path,
+        video_path=video_path,
     )
-
-    # batches = batches[:5]
 
     # Populate the batch queue
     for batch in batches:
@@ -205,7 +220,7 @@ if __name__ == "__main__":
 
     # Create and start worker processes for the first stage
     local_workers = []
-    for i, endpoint in enumerate(ENDPOINTS):
+    for i, endpoint in enumerate(endpoints):
         local_worker_process = multiprocessing.Process(
             target=local_worker,
             args=(i, endpoint, batch_queue, results_queue, local_progress_queue),
@@ -221,7 +236,7 @@ if __name__ == "__main__":
 
     # Create and start worker processes for the second stage (OpenAI API processing)
     openai_workers = []
-    for i in range(NUM_OPENAI_WORKERS):  # Adjust the number of OpenAI workers as needed
+    for i in range(num_openai_workers):  # Adjust the number of OpenAI workers as needed
         openai_worker_process = multiprocessing.Process(
             target=openai_worker,
             args=(
@@ -229,6 +244,7 @@ if __name__ == "__main__":
                 results_queue,
                 final_results_list,
                 openai_progress_queue,
+                openai_azure_deployment,
             ),
         )
         openai_workers.append(openai_worker_process)
@@ -237,7 +253,7 @@ if __name__ == "__main__":
     # Create and start progress monitor process for the combined progress
     openai_progress_monitor_process = multiprocessing.Process(
         target=progress_monitor,
-        args=(len(batches) * BATCH_SIZE, 1, openai_progress_queue),
+        args=(len(batches) * batch_size, 1, openai_progress_queue),
     )
     openai_progress_monitor_process.start()
 
