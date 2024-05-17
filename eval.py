@@ -7,6 +7,7 @@ import openai
 from pathlib import Path
 import pandas as pd
 import json
+from datetime import datetime
 from dotenv import find_dotenv, load_dotenv
 
 _ = load_dotenv(find_dotenv())
@@ -24,6 +25,17 @@ VIDEO_PATH = Path("/data/data/MSRVTT_Zero_Shot_QA/videos/all")
 GT_QUESTIONS_PATH = Path("/data/data/MSRVTT_Zero_Shot_QA/test_q1000.json")
 GT_ANSWERS_PATH = Path("/data/data/MSRVTT_Zero_Shot_QA/test_a.json")
 
+
+# Get the current date and time
+now = datetime.now()
+timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+OUTPUT_PATH = Path(f"eval_results_{timestamp}")
+
+OUTPUT_PATH.mkdir(parents=True, exist_ok=False)
+llm_output_path = OUTPUT_PATH.joinpath("llm_output.jsonl")
+openai_output_path = OUTPUT_PATH.joinpath("openai_output.jsonl")
+scores_path = OUTPUT_PATH.joinpath("scores.json")
 
 # prepare batches
 def prepare_batches(batch_size, temperature, max_new_tokens):
@@ -232,6 +244,11 @@ if __name__ == "__main__":
     # Wait for all batches to be processed in the first stage
     batch_queue.join()
 
+    # llm_results = list(results_queue)
+
+    # with llm_output_path.open("w") as f:
+    #     json.dump(llm_results, f)
+
     # Wait for all results to be processed by the OpenAI workers
     for worker_process in openai_workers:
         worker_process.join()
@@ -247,9 +264,11 @@ if __name__ == "__main__":
     # Gather final results
     final_results = list(final_results_list)
 
+    with openai_output_path.open("w") as f:
+        json.dump(final_results, f)
+
     print("All batches processed.")
     # print("Final Results:", final_results)
-
 
     # Calculate average score and accuracy
     score_sum = 0
@@ -279,3 +298,12 @@ if __name__ == "__main__":
     print("No count:", no_count)
     print("Accuracy:", accuracy)
     print("Average score:", average_score)
+
+    with scores_path.open("w") as f:
+        output_score = {
+            "yes_count": yes_count,
+            "no_count": no_count,
+            "accuracy": accuracy,
+            "average_score": average_score,
+        }
+        json.dump(output_score, f)
