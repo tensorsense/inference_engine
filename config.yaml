@@ -7,9 +7,8 @@ batch_size: 20
 openai_azure_deployment: "gpt-35-turbo-1106"
 num_openai_workers: 5
 
-video_path: "/data/data/MSRVTT_Zero_Shot_QA/videos/all"
-gt_questions_path: "/data/data/MSRVTT_Zero_Shot_QA/test_q1000.json"
-gt_answers_path: "/data/data/MSRVTT_Zero_Shot_QA/test_a.json"
+video_path: "/data/msrvtt-qa/videos"
+qa_path: "/data/msrvtt-qa/qa.json"
 
 temperature: 0.1
 max_new_tokens: 1024

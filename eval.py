@@ -45,21 +45,31 @@ def prepare_batches(
     batch_size,
     temperature,
     max_new_tokens,
-    gt_questions_path,
-    gt_answers_path,
+    qa_path,
     video_path,
     llm_output_path,
 ):
     # read annotations from disk
-    q_df = pd.read_json(gt_questions_path)
-    a_df = pd.read_json(gt_answers_path)
 
-    df = pd.merge(q_df, a_df, on="question_id")
+    with qa_path.open("r") as f:
+        qa = json.load(f)
+    
+    samples = []
+    for entry in qa:
+        for i, conversation in enumerate(entry["conversations"]):
+            assert conversation[0]["from"] == "human"
+            assert conversation[1]["from"] == "gpt"
+
+            samples.append({
+                "video": entry["video"],
+                "messages": conversation,
+                "question_id": f"{entry['video'][:-4]}_{i}"
+            })
+
+    df = pd.DataFrame(samples)
 
     existing_outputs = [path.stem for path in llm_output_path.glob("*.json")]
-    filtered_df = df[~df["question_id"].isin(existing_outputs)]
-
-    # filter inputs that were already processed
+    filtered_df = df[~df["question_id"].isin(existing_outputs)] 
 
     batches = []
     for start in range(0, len(filtered_df), batch_size):
@@ -72,12 +82,12 @@ def prepare_batches(
             batch["inputs"].append(
                 {
                     "video_path": Path(video_path)
-                    .joinpath(f"{sample.video_name}.mp4")
+                    .joinpath(sample.video)
                     .resolve()
                     .as_posix(),
-                    "text_prompt": sample.question,
+                    "text_prompt": sample.messages[0]["value"],
                     "question_id": sample.question_id,
-                    "target_answer": sample.answer,
+                    "target_answer": sample.messages[1]["value"],
                 }
             )
         batch["temperature"] = temperature
@@ -242,8 +252,7 @@ if __name__ == "__main__":
     num_openai_workers = config["num_openai_workers"]
 
     video_path = Path(config["video_path"])
-    gt_questions_path = Path(config["gt_questions_path"])
-    gt_answers_path = Path(config["gt_answers_path"])
+    qa_path = Path(config["qa_path"])
 
     temperature = config["temperature"]
     max_new_tokens = config["max_new_tokens"]
@@ -256,11 +265,13 @@ if __name__ == "__main__":
         batch_size=batch_size,
         temperature=temperature,
         max_new_tokens=max_new_tokens,
-        gt_questions_path=gt_questions_path,
-        gt_answers_path=gt_answers_path,
+        qa_path=qa_path,
         video_path=video_path,
         llm_output_path=llm_output_path,
     )
+
+    batches = batches[:10]
+    num_samples = len(batches) * batch_size
 
     num_batches = len(batches)
 
