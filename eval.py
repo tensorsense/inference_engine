@@ -16,13 +16,28 @@ _ = load_dotenv(find_dotenv())
 # Get the current date and time
 now = datetime.now()
 timestamp = now.strftime("%Y%m%d_%H%M%S")
+DEFAULT_OUTPUT_PATH = Path(f"eval_results_{timestamp}")
 
-OUTPUT_PATH = Path(f"eval_results_{timestamp}")
 
-OUTPUT_PATH.mkdir(parents=True, exist_ok=False)
-llm_output_path = OUTPUT_PATH.joinpath("llm_output.jsonl")
-openai_output_path = OUTPUT_PATH.joinpath("openai_output.jsonl")
-scores_path = OUTPUT_PATH.joinpath("scores.json")
+def set_up_output_paths(output_path: Path):
+
+    llm_output_path = output_path.joinpath("llm_output")
+    openai_output_path = output_path.joinpath("openai_output")
+    final_result_path = output_path.joinpath("final_result.jsonl")
+    scores_path = output_path.joinpath("scores.json")
+
+    llm_output_path.mkdir(exist_ok=True, parents=True)
+    openai_output_path.mkdir(exist_ok=True, parents=True)
+
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=False)
+
+    return {
+        "llm_output_path": llm_output_path,
+        "openai_output_path": openai_output_path,
+        "final_result_path": final_result_path,
+        "scores_path": scores_path,
+    }
 
 
 # prepare batches
@@ -33,6 +48,7 @@ def prepare_batches(
     gt_questions_path,
     gt_answers_path,
     video_path,
+    llm_output_path,
 ):
     # read annotations from disk
     q_df = pd.read_json(gt_questions_path)
@@ -40,10 +56,15 @@ def prepare_batches(
 
     df = pd.merge(q_df, a_df, on="question_id")
 
+    existing_outputs = [path.stem for path in llm_output_path.glob("*.json")]
+    filtered_df = df[~df["question_id"].isin(existing_outputs)]
+
+    # filter inputs that were already processed
+
     batches = []
-    for start in range(0, len(df), batch_size):
+    for start in range(0, len(filtered_df), batch_size):
         end = start + batch_size
-        chunk = df.iloc[start:end]
+        chunk = filtered_df.iloc[start:end]
 
         batch = {"inputs": []}
 
@@ -62,11 +83,13 @@ def prepare_batches(
         batch["temperature"] = temperature
         batch["max_new_tokens"] = max_new_tokens
         batches.append(batch)
-    return batches
+    return batches, len(filtered_df)
 
 
 # Function for each worker to process batches
-def local_worker(worker_id, endpoint, batch_queue, results_queue, progress_queue):
+def local_worker(
+    worker_id, endpoint, batch_queue, results_queue, progress_queue, llm_output_path
+):
     while True:
         try:
             # Get the next batch from the queue
@@ -74,7 +97,6 @@ def local_worker(worker_id, endpoint, batch_queue, results_queue, progress_queue
         except queue.Empty:
             print(f"Worker {worker_id}: No more batches to process. Exiting.")
             break
-
         # Process the batch (simulate by sending to an LLM endpoint)
         response = requests.post(endpoint, json=batch)
 
@@ -98,6 +120,9 @@ def local_worker(worker_id, endpoint, batch_queue, results_queue, progress_queue
                 "proctime": 0.0,
             }
 
+            with llm_output_path.joinpath(f"{sample_set['id']}.json").open("w") as f:
+                json.dump(sample_set, f)
+
             results_queue.put(sample_set)
 
         # Indicate that the task is done
@@ -111,9 +136,10 @@ def local_worker(worker_id, endpoint, batch_queue, results_queue, progress_queue
 def openai_worker(
     worker_id,
     results_queue,
-    final_results_list,
+    final_results_dict,
     progress_queue,
     openai_azure_deployment,
+    openai_output_path,
 ):
     client = openai.AzureOpenAI()
 
@@ -124,6 +150,10 @@ def openai_worker(
         except queue.Empty:
             print(f"OpenAI Worker {worker_id}: No more results to process. Exiting.")
             break
+
+        if result["id"] in final_results_dict:
+            progress_queue.put(1)
+            continue
 
         question = result["question"]
         answer = result["answer"]
@@ -159,7 +189,14 @@ def openai_worker(
             # Convert response to a Python dictionary.
             response_message = completion.choices[0].message.content
             response_dict = json.loads(response_message)
-            final_results_list.append(result | response_dict)
+            final_result = result | response_dict
+
+            with openai_output_path.joinpath(f"{final_result['id']}.json").open(
+                "w"
+            ) as f:
+                json.dump(final_result, f)
+
+            final_results_dict[final_result["id"]] = final_result
         except Exception as e:
             print(f"Failed to process: {e}")
 
@@ -175,10 +212,29 @@ def progress_monitor(total_batches, position, progress_queue):
             pbar.update(1)
 
 
+def load_results_from_disk(path: Path):
+    """Loads results from disk into a list."""
+    results = []
+    for file_path in path.glob("*.json"):
+        with file_path.open("r") as f:
+            results.append(json.load(f))
+    return results
+
+
 if __name__ == "__main__":
     # Load the YAML configuration file
     with open("config.yaml", "r") as file:
         config = yaml.safe_load(file)
+
+    output_path = (
+        Path(config["override_output_path"])
+        if "override_output_path" in config
+        else DEFAULT_OUTPUT_PATH
+    )
+
+    llm_output_path, openai_output_path, final_result_path, scores_path = list(
+        set_up_output_paths(output_path).values()
+    )
 
     endpoints = config["endpoints"]
     batch_size = config["batch_size"]
@@ -196,14 +252,17 @@ if __name__ == "__main__":
     batch_queue = multiprocessing.JoinableQueue()
 
     # Example batches (replace with actual batches)
-    batches = prepare_batches(
+    batches, num_samples = prepare_batches(
         batch_size=batch_size,
         temperature=temperature,
         max_new_tokens=max_new_tokens,
         gt_questions_path=gt_questions_path,
         gt_answers_path=gt_answers_path,
         video_path=video_path,
+        llm_output_path=llm_output_path,
     )
+
+    num_batches = len(batches)
 
     # Populate the batch queue
     for batch in batches:
@@ -211,8 +270,18 @@ if __name__ == "__main__":
 
     # Create a multiprocessing manager to handle shared data
     manager = multiprocessing.Manager()
+
     results_queue = multiprocessing.Queue()
-    final_results_list = manager.list()
+    # Load existing tasks into the task queue
+    existing_results = load_results_from_disk(llm_output_path)
+    for result in existing_results:
+        results_queue.put(result)
+
+    final_results_dict = manager.dict()
+    # Load existing results into the final results dictionary
+    existing_final_results = load_results_from_disk(openai_output_path)
+    for final_result in existing_final_results:
+        final_results_dict[final_result["id"]] = final_result
 
     # Progress queue for monitoring progress
     local_progress_queue = multiprocessing.Queue()
@@ -223,14 +292,21 @@ if __name__ == "__main__":
     for i, endpoint in enumerate(endpoints):
         local_worker_process = multiprocessing.Process(
             target=local_worker,
-            args=(i, endpoint, batch_queue, results_queue, local_progress_queue),
+            args=(
+                i,
+                endpoint,
+                batch_queue,
+                results_queue,
+                local_progress_queue,
+                llm_output_path,
+            ),
         )
         local_workers.append(local_worker_process)
         local_worker_process.start()
 
     # Create and start progress monitor process for the combined progress
     local_progress_monitor_process = multiprocessing.Process(
-        target=progress_monitor, args=(len(batches), 0, local_progress_queue)
+        target=progress_monitor, args=(num_batches, 0, local_progress_queue)
     )
     local_progress_monitor_process.start()
 
@@ -242,9 +318,10 @@ if __name__ == "__main__":
             args=(
                 i,
                 results_queue,
-                final_results_list,
+                final_results_dict,
                 openai_progress_queue,
                 openai_azure_deployment,
+                openai_output_path,
             ),
         )
         openai_workers.append(openai_worker_process)
@@ -253,7 +330,7 @@ if __name__ == "__main__":
     # Create and start progress monitor process for the combined progress
     openai_progress_monitor_process = multiprocessing.Process(
         target=progress_monitor,
-        args=(len(batches) * batch_size, 1, openai_progress_queue),
+        args=(num_samples, 1, openai_progress_queue),
     )
     openai_progress_monitor_process.start()
 
@@ -278,9 +355,9 @@ if __name__ == "__main__":
         worker_process.terminate()
 
     # Gather final results
-    final_results = list(final_results_list)
+    final_results = list(final_results_dict.values())
 
-    with openai_output_path.open("w") as f:
+    with final_result_path.open("w") as f:
         json.dump(final_results, f)
 
     print("All batches processed.")
