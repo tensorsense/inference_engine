@@ -7,7 +7,7 @@ from typing import Optional, List
 # Get the current date and time
 now = datetime.now()
 timestamp = now.strftime("%Y%m%d_%H%M%S")
-DEFAULT_OUTPUT_PATH = Path(f"../eval_results_{timestamp}").resolve()
+DEFAULT_OUTPUT_PATH = Path(f"eval_results_{timestamp}").resolve()
 
 
 class EngineConfig(BaseModel):
@@ -63,6 +63,11 @@ class EngineConfig(BaseModel):
             qa_path=Path(raw_config["qa_path"]),
             temperature=raw_config["temperature"],
             max_new_tokens=raw_config["max_new_tokens"],
+            override_output_path=(
+                raw_config["override_output_path"]
+                if "override_output_path" in raw_config
+                else None
+            ),
         )
 
         config.setup_output_paths()

@@ -1,9 +1,10 @@
 from pathlib import Path
 import pandas as pd
 import json
-from typing import List, Dict
+from typing import List
 
 from core.common.config import EngineConfig
+from core.common.types import Sample, Batch
 
 
 def load_qa(config: EngineConfig) -> pd.DataFrame:
@@ -34,27 +35,28 @@ def load_qa(config: EngineConfig) -> pd.DataFrame:
 
 
 # prepare batches
-def prepare_batches(config: EngineConfig, df: pd.DataFrame) -> List[Dict]:
+def prepare_batches(config: EngineConfig, df: pd.DataFrame) -> List[Batch]:
     batches = []
     for start in range(0, len(df), config.batch_size):
         end = start + config.batch_size
         chunk = df.iloc[start:end]
 
-        batch = {"inputs": []}
+        batch = Batch(
+            temperature=config.temperature,
+            max_new_tokens=config.max_new_tokens,
+        )
 
-        for _, sample in chunk.iterrows():
-            batch["inputs"].append(
-                {
-                    "video_path": Path(config.video_path)
-                    .joinpath(sample.video)
+        for _, row in chunk.iterrows():
+            batch.inputs.append(
+                Sample(
+                    video_path=Path(config.video_path)
+                    .joinpath(row.video)
                     .resolve()
                     .as_posix(),
-                    "text_prompt": sample.messages[0]["value"],
-                    "question_id": sample.question_id,
-                    "target_answer": sample.messages[1]["value"],
-                }
+                    text_prompt=row.messages[0]["value"],
+                    target_answer=row.messages[1]["value"],
+                    question_id=row.question_id,
+                )
             )
-        batch["temperature"] = config.temperature
-        batch["max_new_tokens"] = config.max_new_tokens
         batches.append(batch)
     return batches
