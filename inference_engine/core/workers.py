@@ -23,7 +23,7 @@ def local_worker(
     worker_id: int,
     endpoint: str,
     batch_queue: Queue,
-    results_queue: Queue,
+    llm_outputs_queue: Queue,
     progress_queue: Queue,
     llm_output_path: Path,
 ):
@@ -60,7 +60,7 @@ def local_worker(
             ) as f:
                 f.write(llm_output.model_dump_json())
 
-            results_queue.put(llm_output)
+            llm_outputs_queue.put(llm_output)
 
         # Indicate that the task is done
         batch_queue.task_done()
@@ -72,8 +72,8 @@ def local_worker(
 # Function to process results and send them to the OpenAI API
 def openai_worker(
     worker_id: int,
-    results_queue: Queue,
-    final_results_dict: Dict[str, LLMOutputWithScore],
+    llm_outputs_queue: Queue,
+    scored_outputs_dict: Dict[str, LLMOutputWithScore],
     progress_queue: Queue,
     openai_azure_deployment: str,
     openai_output_path: Path,
@@ -83,12 +83,12 @@ def openai_worker(
     while True:
         try:
             # Get the next result from the queue
-            llm_output = results_queue.get(timeout=25)
+            llm_output = llm_outputs_queue.get(timeout=25)
         except queue.Empty:
             print(f"OpenAI Worker {worker_id}: No more results to process. Exiting.")
             break
 
-        if llm_output.question_id in final_results_dict:
+        if llm_output.question_id in scored_outputs_dict:
             progress_queue.put(1)
             continue
 
@@ -138,7 +138,7 @@ def openai_worker(
             ).open("w") as f:
                 f.write(llm_output_with_score.model_dump_json())
 
-            final_results_dict[llm_output_with_score.question_id] = (
+            scored_outputs_dict[llm_output_with_score.question_id] = (
                 llm_output_with_score
             )
         except Exception as e:

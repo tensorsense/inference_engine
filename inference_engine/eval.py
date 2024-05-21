@@ -29,21 +29,16 @@ def calculate_scores(scored_outputs_dict: Dict[str, LLMOutputWithScore]) -> Scor
     yes_count = 0
     no_count = 0
     for llm_output_with_score in tqdm(scored_outputs_dict.values()):
-        try:
-            # Computing score
-            count += 1
-            score_match = (llm_output_with_score.score,)
-            score = int(score_match)
-            score_sum += score
+        # Computing score
+        count += 1
+        score_sum += llm_output_with_score.score
 
-            # Computing accuracy
-            pred = llm_output_with_score.pred
-            if "yes" in pred.lower():
-                yes_count += 1
-            elif "no" in pred.lower():
-                no_count += 1
-        except:
-            print(llm_output_with_score)
+        # Computing accuracy
+        pred = llm_output_with_score.pred
+        if "yes" in pred.lower():
+            yes_count += 1
+        elif "no" in pred.lower():
+            no_count += 1
 
     average_score = score_sum / count
     accuracy = yes_count / (yes_count + no_count)
@@ -69,9 +64,8 @@ def main():
     batches = prepare_batches(config, qa_df)
 
     # Important to set correctly, otherwise progress monitors will get stuck
-    num_samples = len(qa_df)
     num_batches = len(batches)
-
+    num_samples = len(qa_df)
 
     # Populate the batch queue
     for batch in batches:
@@ -106,7 +100,7 @@ def main():
                 "worker_id": i,
                 "endpoint": endpoint,
                 "batch_queue": batch_queue,
-                "results_queue": llm_outputs_queue,
+                "llm_outputs_queue": llm_outputs_queue,
                 "progress_queue": local_progress_queue,
                 "llm_output_path": config.llm_output_path,
             },
@@ -127,8 +121,8 @@ def main():
             target=openai_worker,
             kwargs={
                 "worker_id": i,
-                "results_queue": llm_outputs_queue,
-                "final_results_dict": scored_outputs_dict,
+                "llm_outputs_queue": llm_outputs_queue,
+                "scored_outputs_dict": scored_outputs_dict,
                 "progress_queue": openai_progress_queue,
                 "openai_azure_deployment": config.openai_azure_deployment,
                 "openai_output_path": config.openai_output_path,
