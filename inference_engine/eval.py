@@ -1,20 +1,14 @@
 import multiprocessing
-import queue
-import requests
 from tqdm import tqdm
-import openai
 from pathlib import Path
-import pandas as pd
 import json
-import yaml
-from datetime import datetime
-from pydantic import BaseModel
 from dotenv import find_dotenv, load_dotenv
+from typing import Dict
 
 _ = load_dotenv(find_dotenv())
 
 from core.common.config import EngineConfig
-from core.common.types import LLMOutput, LLMOutputWithScore
+from core.common.types import LLMOutput, LLMOutputWithScore, Scores
 from core.data import load_qa, prepare_batches
 from core.workers import local_worker, openai_worker, progress_monitor
 
@@ -28,44 +22,38 @@ def load_from_disk(path: Path, cls):
     return results
 
 
-def calculate_scores(final_results):
+def calculate_scores(scored_outputs_dict: Dict[str, LLMOutputWithScore]) -> Scores:
     # Calculate average score and accuracy
     score_sum = 0
     count = 0
     yes_count = 0
     no_count = 0
-    for result in tqdm(final_results):
+    for llm_output_with_score in tqdm(scored_outputs_dict.values()):
         try:
             # Computing score
             count += 1
-            score_match = result["score"]
+            score_match = (llm_output_with_score.score,)
             score = int(score_match)
             score_sum += score
 
             # Computing accuracy
-            pred = result["pred"]
+            pred = llm_output_with_score.pred
             if "yes" in pred.lower():
                 yes_count += 1
             elif "no" in pred.lower():
                 no_count += 1
         except:
-            print(result)
+            print(llm_output_with_score)
 
     average_score = score_sum / count
     accuracy = yes_count / (yes_count + no_count)
-    print("Yes count:", yes_count)
-    print("No count:", no_count)
-    print("Accuracy:", accuracy)
-    print("Average score:", average_score)
 
-    with config.scores_path.open("w") as f:
-        output_score = {
-            "yes_count": yes_count,
-            "no_count": no_count,
-            "accuracy": accuracy,
-            "average_score": average_score,
-        }
-        json.dump(output_score, f)
+    return Scores(
+        yes_count=yes_count,
+        no_count=no_count,
+        accuracy=accuracy,
+        average_score=average_score,
+    )
 
 
 def main():
@@ -79,10 +67,11 @@ def main():
 
     qa_df = load_qa(config)
     batches = prepare_batches(config, qa_df)
-    batches = batches[:1]
 
+    # Important to set correctly, otherwise progress monitors will get stuck
     num_samples = len(qa_df)
     num_batches = len(batches)
+
 
     # Populate the batch queue
     for batch in batches:
@@ -158,33 +147,29 @@ def main():
     # Wait for all batches to be processed in the first stage
     batch_queue.join()
 
-    # llm_results = list(results_queue)
-
-    # with llm_output_path.open("w") as f:
-    #     json.dump(llm_results, f)
-
     # Wait for all results to be processed by the OpenAI workers
     for worker_process in openai_workers:
         worker_process.join()
+
+    print("All workers quit.")
 
     # Ensure the progress monitor process finishes
     local_progress_monitor_process.join()
     openai_progress_monitor_process.join()
 
+    print("Progress monitors quit.")
+
     # Terminate all worker processes for the first stage
     for worker_process in local_workers:
         worker_process.terminate()
 
-    # # Gather final results
-    # final_results = list(scored_outputs_dict.values())
+    print("All batches processed.")
 
-    # with config.final_result_path.open("w") as f:
-    #     json.dump(final_results, f)
+    scores = calculate_scores(scored_outputs_dict)
+    print(scores)
 
-    # print("All batches processed.")
-    # # print("Final Results:", final_results)
-
-    # calculate_scores(final_results)
+    with config.scores_path.open("w") as f:
+        f.write(scores.model_dump_json())
 
 
 if __name__ == "__main__":
