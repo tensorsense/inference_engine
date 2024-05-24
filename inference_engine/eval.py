@@ -10,7 +10,7 @@ _ = load_dotenv(find_dotenv())
 from core.common.config import EngineConfig
 from core.common.types import LLMOutput, LLMOutputWithScore, Scores
 from core.data import load_qa, prepare_batches
-from core.workers import local_worker, openai_worker, progress_monitor
+from core.workers import local_worker, openai_worker, progress_monitor, PbarFlag
 
 
 def load_from_disk(path: Path, cls):
@@ -63,7 +63,7 @@ def main():
     qa_df = load_qa(config)
     batches = prepare_batches(config, qa_df)
 
-    # Important to set correctly, otherwise progress monitors will get stuck
+    # Used to define the lengths of progress bars
     num_batches = len(batches)
     num_samples = len(qa_df)
 
@@ -103,6 +103,7 @@ def main():
                 "llm_outputs_queue": llm_outputs_queue,
                 "progress_queue": local_progress_queue,
                 "llm_output_path": config.llm_output_path,
+                "timeout_s": config.local_worker_timeout,
             },
         )
         local_workers.append(local_worker_process)
@@ -126,6 +127,7 @@ def main():
                 "progress_queue": openai_progress_queue,
                 "openai_azure_deployment": config.openai_azure_deployment,
                 "openai_output_path": config.openai_output_path,
+                "timeout_s": config.openai_worker_timeout,
             },
         )
         openai_workers.append(openai_worker_process)
@@ -146,6 +148,9 @@ def main():
         worker_process.join()
 
     print("All workers quit.")
+
+    local_progress_queue.put(PbarFlag.QUIT)
+    openai_progress_queue.put(PbarFlag.QUIT)
 
     # Ensure the progress monitor process finishes
     local_progress_monitor_process.join()

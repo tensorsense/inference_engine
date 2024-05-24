@@ -24,6 +24,8 @@ class EngineConfig(BaseModel):
     qa_path: Path
 
     override_output_path: Optional[Path] = Field(default=None)
+    local_worker_timeout: Optional[int] = Field(default=10)
+    openai_worker_timeout: Optional[int] = Field(default=25)
 
     root_output_path: Optional[Path] = Field(default=None)
     llm_output_path: Optional[Path] = Field(default=None)
@@ -54,21 +56,10 @@ class EngineConfig(BaseModel):
         with yaml_path.open("r") as f:
             raw_config = yaml.safe_load(f)
 
-        config = cls(
-            endpoints=raw_config["endpoints"],
-            batch_size=raw_config["batch_size"],
-            openai_azure_deployment=raw_config["openai_azure_deployment"],
-            num_openai_workers=raw_config["num_openai_workers"],
-            video_path=Path(raw_config["video_path"]),
-            qa_path=Path(raw_config["qa_path"]),
-            temperature=raw_config["temperature"],
-            max_new_tokens=raw_config["max_new_tokens"],
-            override_output_path=(
-                raw_config["override_output_path"]
-                if "override_output_path" in raw_config
-                else None
-            ),
-        )
+        raw_config["video_path"] = Path(raw_config["video_path"])
+        raw_config["qa_path"] = Path(raw_config["qa_path"])
+
+        config = cls(**raw_config)
 
         config.setup_output_paths()
         return config

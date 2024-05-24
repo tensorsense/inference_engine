@@ -8,6 +8,7 @@ from multiprocessing import Queue
 
 from pathlib import Path
 from typing import Dict
+from enum import Enum
 
 from core.common.types import (
     Batch,
@@ -18,6 +19,11 @@ from core.common.types import (
 )
 
 
+class PbarFlag(Enum):
+    INCREMENT = 1
+    QUIT = -1
+
+
 # Function for each worker to process batches
 def local_worker(
     worker_id: int,
@@ -26,11 +32,14 @@ def local_worker(
     llm_outputs_queue: Queue,
     progress_queue: Queue,
     llm_output_path: Path,
+    timeout_s: int = 10,
 ):
     while True:
         try:
             # Get the next batch from the queue
-            batch: Batch = batch_queue.get(timeout=10)  # Timeout to avoid infinite blocking
+            batch: Batch = batch_queue.get(
+                timeout=timeout_s
+            )  # Timeout to avoid infinite blocking
         except queue.Empty:
             print(f"Worker {worker_id}: No more batches to process. Exiting.")
             break
@@ -40,33 +49,31 @@ def local_worker(
 
         if response.status_code == 200:
             batch_llm_prediction = BatchLLMPrediction.model_validate(response.json())
+            # Postprocess the outputs
+            for sample, llm_prediction in zip(
+                batch.inputs, batch_llm_prediction.predicted_texts
+            ):
+                llm_output = LLMOutput.from_sample(
+                    sample=sample,
+                    llm_prediction=llm_prediction,
+                    ntokens=batch_llm_prediction.ntokens,
+                    proctime=batch_llm_prediction.proctime,
+                )
+
+                with llm_output_path.joinpath(f"{llm_output.question_id}.json").open(
+                    "w"
+                ) as f:
+                    f.write(llm_output.model_dump_json())
+
+                llm_outputs_queue.put(llm_output)
         else:
             print(f"Worker {worker_id}: Failed to process batch: {batch}")
-            continue
-
-        # Postprocess the outputs
-        for sample, llm_prediction in zip(
-            batch.inputs, batch_llm_prediction.predicted_texts
-        ):
-            llm_output = LLMOutput.from_sample(
-                sample=sample,
-                llm_prediction=llm_prediction,
-                ntokens=batch_llm_prediction.ntokens,
-                proctime=batch_llm_prediction.proctime,
-            )
-
-            with llm_output_path.joinpath(f"{llm_output.question_id}.json").open(
-                "w"
-            ) as f:
-                f.write(llm_output.model_dump_json())
-
-            llm_outputs_queue.put(llm_output)
 
         # Indicate that the task is done
         batch_queue.task_done()
 
         # Update progress
-        progress_queue.put(1)
+        progress_queue.put(PbarFlag.INCREMENT)
 
 
 # Function to process results and send them to the OpenAI API
@@ -77,19 +84,20 @@ def openai_worker(
     progress_queue: Queue,
     openai_azure_deployment: str,
     openai_output_path: Path,
+    timeout_s: int = 25,
 ):
     client = openai.AzureOpenAI()
 
     while True:
         try:
             # Get the next result from the queue
-            llm_output = llm_outputs_queue.get(timeout=25)
+            llm_output = llm_outputs_queue.get(timeout=timeout_s)
         except queue.Empty:
             print(f"OpenAI Worker {worker_id}: No more results to process. Exiting.")
             break
 
         if llm_output.question_id in scored_outputs_dict:
-            progress_queue.put(1)
+            progress_queue.put(PbarFlag.INCREMENT)
             continue
 
         try:
@@ -145,12 +153,17 @@ def openai_worker(
             print(f"Failed to process: {e}")
 
         # Update progress
-        progress_queue.put(1)
+        progress_queue.put(PbarFlag.INCREMENT)
 
 
 # Function to update progress bar
 def progress_monitor(total_batches, position, progress_queue):
     with tqdm(total=total_batches, position=position, leave=True) as pbar:
         for _ in range(total_batches):
-            progress_queue.get()
-            pbar.update(1)
+            flag = progress_queue.get()
+            if flag == PbarFlag.INCREMENT:
+                pbar.update(1)
+            elif flag == PbarFlag.QUIT:
+                break
+            else:
+                raise NotImplementedError
