@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 class Sample(BaseModel):
@@ -24,12 +24,12 @@ class BatchLLMPrediction(BaseModel):
 
 class LLMOutput(Sample):
     llm_prediction: str
-    ntokens: int
-    proctime: float
+    ntokens: Optional[int]
+    proctime: Optional[float]
 
     @classmethod
     def from_sample(
-        cls, sample: Sample, llm_prediction: str, ntokens: int, proctime: float
+        cls, sample: Sample, llm_prediction: str, ntokens: Optional[int], proctime: Optional[float]
     ) -> "LLMOutput":
         return cls(
             video_path=sample.video_path,
